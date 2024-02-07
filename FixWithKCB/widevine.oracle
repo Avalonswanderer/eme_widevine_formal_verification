@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+
+import re
+import os
+import sys
+
+# ------------------------------------------------
+# definition of the oracle
+#   only touch this part to update the oracle
+# ------------------------------------------------
+
+# indicates if a default oracle should be used for lemmas
+#  when no specific oracle was given
+defaultOracle = True
+
+
+# gives for each lemma a list of regular expressions indicating how to sort goals
+# - the goals will be sorted according to the first regular expression they match
+# - the list may contain None to indicate where goals that match no regex are put
+#   (by default, at the end. If None is there several times, we use the first.)
+# (here 'match' means 'a prefix of the goal (removing initial white spaces) matches the regex')
+goalOrder = {
+  'OTT2': ['.*OTT2_response.*'],
+  'LoadRespUnique': ['.*CDMNonce'],
+  'kSessionKeySecrecyKU': [None, '.*keyID.*', '.*newlicence.*renewable'],
+  'CDMKeysInit': ['.*last.*', '.*CDMKey.*'],
+  'CDMKeysNull': ['.*last.*i1.*', '.*LCDMDeriveKeys.*j.*i2.*','.*CDMKeys.*null.*null.*null.*i1.*', '.*CDMKeys.*i2.*'],
+  'CDMKeysInitStrong': ['.*last.*', '.*CDMKey.*'],
+  'CDMContentKeyInit': ['.*#j = #i.*', '.*LCDMLoad.*', '.*CDMContentKey.*'],
+  'OTTkDeviceSecrecyKU': \
+  ['.*sign.*newreqTag.*', '.*enc.*clientID.*', '.*kDevice.*j.*', '.*Certificate.*', \
+   '.*rootCert.*', '.*sign.*device.*', '.*sign.*root.*', '.*kSign.*'],
+  'OTTLicenseResponseBeforeLoad': ['.*LCDMDeriveKeys.*', '.*null.*', '.*loadTag.*', '.*KU.*KDF.*', '.*KU.*enc.*kContent.*'],
+#  'OTTRefreshResponseBeforeLoadRefresh': \
+#  ['.*KU.*KDF.*', '.*enc.*kContent.*null.*', '.*LCDMDeriveKeys.*', '.*renewTag.*', \
+#   '.*loadTag.*', '.*newreqTag.*', '.*Movie.*kContent.*', '.*KU.*enc.*kContent.*', '.*null.*'],
+  'OTTRefreshResponseBeforeLoadRefresh': \
+  ['.*enc.*kContent.*null.*', '.*LCDMDeriveKeys.*', '.*renewTag.*', '.*Movie.*', '.*loadTag.*', '.*KU.*KDF.*'],
+  'LoadUnique':['.*KU.KDF.*','.*newreqTag.*', '.*loadTag.*', 'CDMNonce' ],
+  'counterIncreaseStrict': ['.*LCDMContentKey.*', '.*CDMContentKey.*j2.*', '.*counter.*⊏.*', '.*j1.[=<>].vr'],
+  'counterIncrease': ['.*LCDMContentKey.*', '.*CDMContentKey.*j2.*', '.*counter.*⊏.*'],
+  'CDMContentKeyAuthorised': ['LCDMContentKey.*', '\(∃.*LCDMLoadRefresh.*', 'CDMContentKey.*counter\s*\)'],
+  'SameCounterNoLoad': ['.*#i3 = #i2.*', '.*CDMContentKey.*i3.*', '.*LCDMContentKey.*i1', 'CDMContentKey.*i2.*', '.*LCDMContentKey.*i2.*'],
+  'SameCounterSamePolicy': ['.*last.*', '.*LCDMContentKey.*i2', '.*CDMContentKey.*i2', '.*#i1 = [^=]*$', '.*#i1 = .*', '.*LCDMContentKey.*i1', '.*CDMContentKey.*i1'],
+  'exec': ['.*renewTag.*','.*renewreqTag.*', '.*newreqTag.*', '.*loadTag.*', '.*CDMSession.*', '.*CDMState.*', '.*CDMKeys.*', '.*CDMContentKey.*', '.*sign.*', '.*enc.*k.*', '.*⊏.*'],
+  'LoadRefreshOnlyIfRenewable': ['.*KU\( KDF.*', '.*renewreqTag.*', '.*CDMContentKey.*i1.*']
+}
+
+
+# default order, for lemmas not covered in goalOrder
+# (only used if defaultOracle is set to True)
+defaultGoalOrder = [None, '.*keyID.*', '.*⊏.*']
+
+
+
+# ------------------------------------------------
+# code of the oracle -- don't touch this part
+# ------------------------------------------------
+
+# the name of the lemma we're currently proving (given in arg)
+lemma = sys.argv[1]
+
+
+# exit immediately if we don't have an oracle for this lemma or a default oracle
+if lemma not in goalOrder and not defaultOracle:
+  exit(0)
+
+
+# read (on stdin) the list of goals
+# lines is a list of "%i:goal" where "%i" is the index of the goal
+lines = sys.stdin.readlines()
+
+
+# get the goal order for the current lemma
+order = []
+if lemma in goalOrder:
+  order = goalOrder[lemma]
+else:
+  order = defaultGoalOrder
+
+  
+# add None at the end if it's not already there
+if None not in order:
+  order.append(None)
+  
+
+# to sort goals, we give each goal a priority: in the end, they are sorted
+# in decreasing order of priority.
+#   if order is [re_1,… re_n], priorities are between 0 and n-1:
+#     - we give a goal priority n - i if the first regex it matches is re_i
+#     - or if it matches no regex and re_i is (the first instance of) None
+# rank[p] = list of indices of goals with priority p
+maxRank = len(order) - 1
+rank = [[] for i in range(maxRank + 1)]
+noneRank = maxRank - order.index(None)
+
+
+# fill the ranking table
+for line in lines:
+  num = line.split(':')[0]  # index
+  goal = line.split(':')[1] # goal
+  for i, exp in enumerate(order):
+    if exp is not None:
+      if re.match('\s*' + exp, goal):
+        rank[maxRank - i].append(num)
+        break
+  else: # goal didn't match anything
+    rank[noneRank].append(num)
+
+
+# sort all goals by ranking (higher first), print to stderr
+for listGoals in reversed(rank):
+  for goal in listGoals:
+    sys.stderr.write(goal)
+    print(goal)
+

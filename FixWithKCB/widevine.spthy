@@ -1,0 +1,1084 @@
+/*-------------------------------------------------------------------*/
+/* Model of Widevine with KCB in the Refresh part - FIXED            */
+/*-------------------------------------------------------------------*/
+/*                                                                   */
+/*  - We model time using counters starting its initialisation at 1  */
+/*  - We use the same symbol pk for encryption and verification keys */
+/*    This is unsual but reflects what happens in Widevine           */
+/*                                                                   */
+/*-------------------------------------------------------------------*/
+
+theory FixWithKCB
+begin
+
+/*-------------------------------------------------------------------*/
+/* Function symbols and equational theory                            */
+/*-------------------------------------------------------------------*/
+functions:
+ enc/2, dec/2,
+ aenc/2, adec/2, pk/1,
+ sign/2, checksign/3, true/0, getmsg/1,
+ KDF/1, hmac/2
+
+builtins: natural-numbers
+
+equations: dec(enc(x, k), k) = x
+equations: adec(aenc(x, pk(k)), k) = x
+equations: checksign(sign(m, k), m, pk(k)) = true
+equations: getmsg(sign(m,k)) = m
+
+
+/*-------------------------------------------------------------------*/
+/* Protocol rules: Key generation and distribution                   */
+/*-------------------------------------------------------------------*/
+/*                                                                   */
+/*   - Public certificates, public keys, and signatures are          */
+/*     given to the attacker                                         */
+/*   - Tags are used to avoid confusion between certificates         */    
+/*                                                                   */
+/*-------------------------------------------------------------------*/
+
+rule GenOTTKey: // priv0, pub0
+  [  Fr(~kOTT) ]
+--[  LOTTKey(~kOTT) ]->
+  [ !OTTKey($ottID, ~kOTT),
+     Out(pk(~kOTT)) ]
+
+rule GenCertificate: // rootCert priv/pub
+  [  Fr(~rootcert) ]
+--[  LCertificate(~rootcert) ]->
+  [ !Certificate(~rootcert),
+     Out(pk(~rootcert)) ]
+
+rule GenDeviceSignKey: // signer priv/pub
+  [  Fr(~kSign),
+    !Certificate(~rootcert) ]
+--[  LDeviceSignKey(~kSign) ]->
+  [ !DeviceSignKey(~kSign),
+     Out(pk(~kSign)),
+     Out(sign(<'root',pk(~kSign)>, ~rootcert)) ]
+   
+rule GenDeviceKey: // DeviceRSAKey priv/pub
+  [  Fr(~kDevice),
+    !DeviceSignKey(~kSign) ]
+--[  LDeviceKey(~kDevice) ]->
+  [ !DeviceKey(~kDevice),
+     Out(pk(~kDevice)),
+     Out(sign(<'device',pk(~kDevice)>, ~kSign)) ]
+
+rule GenMovie: // Create a new movie
+  [  Fr(~movie) ]
+--[  LMovieGen($title, ~movie) ]->
+  [ !MovieGen($title, ~movie) ]
+
+rule GenMovieKeys: /* Create a new key for an existing movie
+     (the same movie can be encrypted by different keys) */
+  [  Fr(~kContent),
+     Fr(~keyID),
+    !MovieGen($title, ~movie) ]
+--[  LMovieKey($title, ~movie, $ottID, ~keyID, ~kContent) ]->
+  [ !Movie($title, ~movie, $ottID, ~keyID, ~kContent),
+     Out(~keyID) ]
+
+
+/*-------------------------------------------------------------------*/
+/* Protocol rules: Initialisation                                    */
+/*-------------------------------------------------------------------*/
+/*                                                                   */
+/*   - CDMInit: Initialise a CDM: creates a persistent               */
+/*     CDMInit storing the device key and clientID for that CDM      */
+/*                                                                   */
+/*   - OTTInit: Initialise an OTT session (identified by a rid)      */
+/*     The session in initialised for a given movie with keyID       */
+/*                                                                   */
+/*-------------------------------------------------------------------*/
+
+rule CDMInit:
+ let clientID =
+   <$serialNumber,
+    pk(~kDevice),
+    sign(<'device', pk(~kDevice)>, ~kSign),
+    pk(~kSign),
+    sign(<'root', pk(~kSign)>, ~rootCert),
+    $clientInfo>
+ in
+  [  Fr(~deviceID),
+    !Certificate(~rootCert),
+    !DeviceKey(~kDevice),
+    !DeviceSignKey(~kSign) ]
+--[  LCDMInit(~deviceID, ~kDevice, clientID) ]->
+  [ !CDMInit(~deviceID, ~kDevice, clientID) ]
+
+rule OTTInit:
+  let initdata = <$ottID, ~keyID>
+  in    
+  [  Fr(~rID),
+    !OTTKey($ottID, ~kOTT),
+     In($title),
+    !Movie($title, ~movie, $ottID, ~keyID, ~kContent) ]
+--[  LOTTInit(~rID, $ottID, ~kOTT) ]->
+  [  OTTInit(~rID, $ottID, ~kOTT),
+     Out(initdata) ]
+
+
+/*-------------------------------------------------------------------*/
+/* Protocol rules: CDM                                               */
+/*-------------------------------------------------------------------*/
+/*                                                                   */
+/*  - CDMOpenSession: starts an initialised CDM, creates a sessionID */
+/*    and a fact CDMSession storing all its data.                    */
+/*                                                                   */
+/*  - CDMGenerateRequest: generates a request, the facts             */
+/*    CDMContentKey and CDMKeys represent the creation of the two    */
+/*    memory cells used to store keys and some extra information     */
+/*                                                                   */
+/*  - CDMDerive: derives Kenc and KMac keys from session keys        */
+/*    The fix proposed consists in adding the signature of the OTT   */
+/*                                                                   */
+/*  - CDMLoad: loads the contentKey received in the response         */
+/*    from the OTT.                                                  */
+/*                                                                   */
+/*  - CDMGenerateRefreshRequest: generates a refresh request         */
+/*                                                                   */
+/*  - CDMLoadRefresh: handles refresh response and                   */
+/*    refresh content key                                            */
+/*                                                                   */
+/*  - CDMUseKey: uses the key to read the movie.                     */
+/*    This rule comes with a "Tamarin restriction" UseKeyLegal       */
+/*    whose purpose is to check that it is indeed legal, from the    */
+/*    timing point of view, to use the key.                          */
+/*                                                                   */
+/*-------------------------------------------------------------------*/
+
+/* CDMSession is persistent, so that other rules may be called
+   any number of time in that session afterwards. */
+/* Note that we do not model the "setting the OTT key" part. 
+   The fact OTTKey is used directly in the CDMGenerateRequest rule instead */
+rule CDMOpenSession:
+  [  Fr(~sessionID),
+    !CDMInit(~deviceID, kDevice, clientID) ]
+--[  LCDMOpenSession(~sessionID, ~deviceID, kDevice),
+     LClientID(clientID) ]->
+  [ !CDMSession(~sessionID, ~deviceID, kDevice, clientID),
+     Out(~sessionID)]
+
+rule CDMGenerateRequest:
+let request = <~requestID,
+               ~keyID,
+               %t,
+               enc(<'clientID', clientID>, ~kPrivacy),
+               aenc(~kPrivacy, pk(~kOTT)),
+               ~nonce>
+    signReq = sign(<'newreqTag', request>, kDevice)
+in
+  [  In(%t),
+     In(~keyID), // the attacker may choose the movie he wants
+    !CDMSession(~sessionID, ~deviceID, kDevice, clientID),
+    !OTTKey($ottID, ~kOTT),
+     Fr(~nonce),
+     Fr(~requestID),
+     Fr(~kPrivacy) ]
+--[  GTime(%t),
+     LCDMGenerateRequest(~requestID, ~sessionID, ~deviceID, %t),
+     LCDMContentKey(~requestID, ~sessionID, ~deviceID,
+                    'null', 'null', 'null','null', 'null', 'null', %1) ]-> //???
+  [  Out(<request, signReq>),
+     CDMNonce(~nonce, ~sessionID, ~deviceID),
+    !CDMState(~requestID, ~sessionID, ~deviceID, $ottID, ~kOTT, request, %t),
+     CDMKeys(~requestID, ~sessionID, ~deviceID, 'null', 'null', 'null'),
+     CDMContentKey(~requestID, ~sessionID, ~deviceID,
+                   'null', 'null', 'null','null', 'null','null', %1) ] 
+     
+
+/* CDM Derive Keys from session keys */
+rule CDMDerive:
+  let
+    pkDevice = pk(kDevice)
+    enc_kSession = sign(<'derive',aenc(kSession, pkDevice)>, ~kOTT)
+                   // Fix: adding the signature of the ott
+    enc_context = <'encryption', request> 
+    mac_context = <'authentication', request> 
+    kEnc = KDF(<enc_context, kSession>)
+    kMacS = KDF(<<'S', mac_context>, kSession>)
+    kMacC = KDF(<<'C', mac_context>, kSession>)   
+  in
+  [ !CDMSession(~sessionID, ~deviceID, kDevice,  clientID),
+    !CDMState(~requestID, ~sessionID, ~deviceID, $ottID, ~kOTT, request, %t),
+     CDMKeys(~requestID, ~sessionID, ~deviceID, xundef1, xundef2, xundef3),
+     In(enc_kSession),
+     In(~requestID) ] // actually the entire response,
+                      // but only requestID is useful
+--[  LCDMDerive(~requestID, ~sessionID,  ~deviceID,
+                kDevice, clientID, kEnc, kMacS, kMacC),
+     LCDMDeriveKeys(~requestID, ~sessionID, ~deviceID, kEnc, kMacS, kMacC),
+     LCDMSessionKey(kSession) ]->
+  [  CDMKeys(~requestID, ~sessionID, ~deviceID, kEnc, kMacS, kMacC) ]
+
+
+
+
+/* The counter is left unchanged when loading,
+   as we do not know whether it should be reset or not. */
+/* The time %t1 stored in the fact CDMContentKey is the one received
+   in the response, and the CDM checks that this is exactly the time
+   at which it generates its request (cf. CDMState) */
+/* Note that the KCB also contains the information regarding delta,
+   but it is not checked and not really used, thus we call it deltaBis */
+/* In reality, the CDM computes the time during which it can use the key
+   as follows: delta - (t - t1), i.e. the OTT gives it delta units of time
+   starting at time t1, 
+   since the CDM loads this response at time t, it remains delta - (t - t1)
+   units of time. Instead of doing this computation,
+   we simply store %t1 and $delta. */
+/* The values %t1 and %delta stored in the fact CDMContentKey tells us
+   that the key can be used until %t1 + %delta - note that this is equal
+   to the use of the key delta - (t - t1) unit of time starting from t */
+rule CDMLoad:
+  let
+    enc_kContent = enc(kContent, kEnc)
+    KCB = <%deltaBis, usage, ~n>
+    enc_KCB = enc(KCB, kContent)
+    response = <~requestID,
+                %t1,
+                %delta,
+                licencePolicy,
+                keyID,
+                enc_kContent,
+                enc_KCB>
+    mac = hmac(<'loadTag', response>, kMacS)
+  in
+  [  In(%t),
+    !CDMSession(~sessionID, ~deviceID, kDevice, clientID),
+    !CDMState(~requestID, ~sessionID, ~deviceID, ottID, kOTT, request, %t1), 
+     CDMNonce(~n, ~sessionID, ~deviceID), // consume the nonce
+     CDMKeys(~requestID, ~sessionID, ~deviceID, kEnc, kMacS, kMacC),
+     CDMContentKey(~requestID, ~sessionID, ~deviceID,
+                   xkeyID, xkContent, xusage, xpolicy, xt, xdelta1, %xcpt),
+     In(response),
+     In(mac) ]
+--[  GTime(%t),
+     LCDMLoad(~requestID, ~sessionID, ~deviceID, kDevice, clientID,
+              kContent, kEnc, kMacS, kMacC, response),
+     LCDMContentKey(~requestID, ~sessionID, ~deviceID,
+                    keyID, kContent, usage, licencePolicy, %t1, %delta, %xcpt),
+     LCDMKeys(~requestID, ~sessionID, ~deviceID, kEnc, kMacS, kMacC) ]->
+  [  CDMKeys(~requestID, ~sessionID, ~deviceID, kEnc, kMacS, kMacC),
+     CDMContentKey(~requestID, ~sessionID, ~deviceID,
+                   keyID, kContent, usage, licencePolicy, %t1, %delta, %xcpt) ] 
+
+
+
+/* This operation is done at global time %t, whereas the initial request
+   was done at time %t1, both times appear in the refresh request */
+/* Note that we do not store %t, the time at which the refresh request
+   has been done, since no check will be performed on it when the response
+   is received. */
+rule CDMGenerateRefreshRequest:
+  let
+    renewal_request = <~requestID, 
+                       %t1,       
+                       %t,
+                       %counter,
+                       'renewable',
+                        enc(<'clientID', clientID>, ~kPrivacyR),
+                       aenc(~kPrivacyR, pk(~kOTT)),
+                       ~nonce>
+    macrequest = hmac(<'renewreqTag', renewal_request>, kMacC)
+   in
+  [  In(%t),
+    !CDMSession(~sessionID, ~deviceID, kDevice,  clientID),
+    !CDMState(~requestID, ~sessionID, ~deviceID, $ottID, ~kOTT, request, %t1),
+     CDMKeys(~requestID, ~sessionID, ~deviceID, kEnc, kMacS, kMacC),
+     Fr(~kPrivacyR),
+     Fr(~nonce),
+     CDMContentKey(~requestID,~sessionID, ~deviceID, keyID,
+                   kContent, usage, 'renewable', %xt, %xdelta, %counter)
+ ]
+--[  GTime(%t),
+     LCDMGenerateRefreshRequest(~requestID, ~sessionID, ~deviceID,
+                                %t1, kEnc, kMacS, kMacC),
+     LCDMContentKey(~requestID, ~sessionID, ~deviceID, keyID,
+                    kContent, usage, 'renewable', %xt, %xdelta, %counter),
+     LCDMContentKeyNoLoad(~requestID, ~sessionID, ~deviceID, keyID,
+                          kContent, usage, 'renewable', %xt, %xdelta, %counter),
+     LCDMKeys(~requestID, ~sessionID, ~deviceID, kEnc, kMacS, kMacC) ]->
+  [  Out(<renewal_request, macrequest>),
+     CDMNonce(~nonce, ~sessionID, ~deviceID),
+     CDMKeys(~requestID, ~sessionID, ~deviceID, kEnc, kMacS, kMacC),
+     CDMContentKey(~requestID, ~sessionID, ~deviceID, keyID,
+                   kContent, usage, 'renewable', %xt, %xdelta, %counter) ]
+  
+
+
+/* This load refresh operation is performed at global time %t
+   whereas the generateRefreshRequest operation was done at time %t2Recv,
+   and the original generateRequest at %t1Recv */
+/* The response received by the CDM includes a counter whose value
+   %counter + %x has to be strictly larger than the one store until now */
+/* Note that the CDM does not check that t1 is equal to t1Recv
+   (as done e.g. in the initial load) */
+/* In reality, the CDM computes the time during which it can use the key
+   as follows: delta - (t - t2Recv) starting at time t (the current time),
+   this means that the OTT gives it delta units of time,
+   starting at time t2Recv.
+   Instead of doing this computation, we simply store %t2Recv and $delta. */
+/* The values %t2Recv and %delta stored in the fact CDMContentKey
+   tell us that the key can be used until %t2Recv + %delta. */
+rule CDMLoadRefresh:
+  let KCB = <%deltaBis, usage, ~nonce>
+      enc_KCB = enc(KCB, kContent)
+      renewal_response = <~requestID,
+                          %t1Recv,
+                          %t2Recv, 
+                          %counter %+ %x,
+                          new_licencePolicy,
+                          %delta,
+                          enc_KCB> // With KCB
+    mac = hmac(<'renewTag', renewal_response>, kMacS)
+  in
+  [  In(%t),
+    !CDMSession(~sessionID, ~deviceID, kDevice,  clientID),
+    !CDMState(~requestID, ~sessionID, ~deviceID, ottID, kOTT, request, %t1), 
+     CDMKeys(~requestID, ~sessionID, ~deviceID, kEnc, kMacS, kMacC),
+     CDMContentKey(~requestID, ~sessionID, ~deviceID, keyID,
+                   kContent, usage, licencePolicy, %t2, xdelta, %counter),
+     CDMNonce(~nonce,~sessionID, ~deviceID), // consume the nonce
+     In(renewal_response),
+     In(mac) ]
+--[  GTime(%t),
+     LCDMLoadRefresh(~requestID, ~sessionID, ~deviceID, kDevice,
+                     clientID, kContent, kEnc, kMacS, kMacC,
+                     renewal_response, licencePolicy),
+     LCDMContentKey(~requestID, ~sessionID, ~deviceID, keyID,
+                    kContent, usage, new_licencePolicy,
+                    %t2Recv, %delta, %counter %+ %x),
+     LCDMContentKeyNoLoad(~requestID, ~sessionID, ~deviceID, keyID,
+                          kContent,usage, new_licencePolicy,
+                          %t2Recv, %delta, %counter %+ %x),
+     LCDMContentKeyInc(~requestID, ~sessionID, ~deviceID, keyID,
+                       kContent, usage, new_licencePolicy,
+                       %t2Recv, %delta, %counter %+ %x),
+     LCDMKeys(~requestID, ~sessionID, ~deviceID, kEnc, kMacS, kMacC) ]->
+  [  CDMKeys(~requestID, ~sessionID, ~deviceID, kEnc, kMacS, kMacC),
+     CDMContentKey(~requestID, ~sessionID, ~deviceID, keyID,
+                   kContent, usage, new_licencePolicy,
+                   %t2Recv, %delta, %counter %+ %x) ]
+
+
+/* CDM uses the key to read the movie. */
+/* tag must be 'use' */
+/* This operation is performed at time %t, and we have to check that
+   this use is authorised at time %t from the point of view of the CDM, 
+   i.e. %t < %t2 + %delta -- this is imposed by the restriction written
+   just below the rule */
+
+rule CDMUseKey:
+  [  In(%t),
+     In(enc(<'movietag', m>, kContent)),
+     CDMContentKey(~requestID,~sessionID, ~deviceID, keyID, kContent,
+                   'use', licencePolicy, %t2, %delta, %xcpt) ]
+--[  GTime(%t),
+     LCDMUseKey(~requestID, ~sessionID, ~deviceID, keyID, kContent),
+     LCDMContentKey(~requestID, ~sessionID, ~deviceID, keyID,
+                    kContent, 'use', licencePolicy, %t2, %delta, %xcpt),
+     LCDMContentKeyNoLoad(~requestID, ~sessionID, ~deviceID, keyID,
+                          kContent, 'use', licencePolicy,
+                          %t2, %delta, %xcpt) ]->
+  [  CDMContentKey(~requestID, ~sessionID, ~deviceID, keyID,
+                   kContent,'use', licencePolicy, %t2, %delta, %xcpt) ]
+
+
+restriction UseKeyLegal:
+  "All #i requestID sessionID deviceID keyID
+          kContent %t usage licencePolicy %t2 %delta xcpt.
+     LCDMUseKey(requestID, sessionID, deviceID, keyID, kContent)@i &
+     LCDMContentKey(requestID, sessionID, deviceID, keyID,
+                    kContent, usage, licencePolicy, %t2, %delta, xcpt)@i &
+     GTime(%t)@i
+   ==>
+     %t << %t2 %+ %delta"
+   
+
+/*-------------------------------------------------------------------*/
+/* Protocol rules: OTT                                               */
+/*-------------------------------------------------------------------*/
+/*                                                                   */
+/*  - OTTLicenseResponse: Response to initial request by OTT.        */
+/*                                                                   */
+/*  - OTTRefreshResponse: Response by OTT to refresh request         */
+/*                                                                   */
+/*  Regarding the licence policy, in both cases, the OTT has to      */
+/*  decide whether the key is still 'renewable' or not.              */
+/*  Both situations are modeled using a "Tamarin restriction" named  */
+/*  LicenceRenewOrStop.                                              */
+/*                                                                   */
+/*  - OTTSendMovie: OTT sends a movie encrypted by its content key   */
+/*                                                                   */
+/*-------------------------------------------------------------------*/
+
+/* The request received by the OTT contains the time %t1
+   at which the request by the CDM has been performed. */
+/* This time %t1 is also part of the response, and the OTT fixes %delta,
+   the period during which the CDM will be able 
+   to use the key starting at t1.
+   In our model this period is fixed by the attacker. */
+
+rule OTTLicenseResponse:
+  let
+    pkDevice = pk(kDevice)
+    clientID = <$serialNumber,
+                pkDevice, sign(<'device', pkDevice>, kSign),
+                pk(kSign), sign(<'root', pk(kSign)>, ~rootCert),
+                $clientInfo>
+    request = <requestID, ~keyID, %t1,
+               enc(<'clientID', clientID>, kPrivacy),
+               aenc(kPrivacy, pk(~kOTT)),
+               n>
+    signReq = sign(<'newreqTag', request>, kDevice)
+    kEnc = KDF(<<'encryption', request>, ~kSession>)
+    kMacS = KDF(<<'S', <'authentication', request>>, ~kSession>)
+    kMacC = KDF(<<'C', <'authentication', request>>, ~kSession>)
+    response = <requestID, 
+                %t1,
+                %delta,
+                $newlicence, 
+                ~keyID,
+                enc(~kContent, kEnc),
+                enc(< %delta, 'use', n>, ~kContent)>
+    mac = hmac(<'loadTag', response>, kMacS)
+    enc_kSession = sign(<'derive', aenc(~kSession, pkDevice)>, ~kOTT) // Fix
+  in
+  [  In(%delta),
+     OTTInit(~rID, $ottID, ~kOTT),
+    !Certificate(~rootCert),
+    !Movie($title, ~movie, $ottID, ~keyID, ~kContent),
+     In(<request, signReq>),
+     Fr(~kSession) ]
+--[  LOTTLicenseResponse(~rID, $ottID, ~kOTT, requestID,
+                         ~kContent, kEnc, kMacS, kMacC, response),
+     LOTTAuthorise(requestID, $ottID, %t1, %delta),
+     LOTTkDeviceKey(kDevice),
+     Licence($newlicence),
+     LSessionKey(~kSession) ]->
+  [  OTT2_response(~rID, $ottID, ~kOTT, requestID,
+                   ~kContent, kEnc, kMacS, kMacC),
+     Out(<response, mac, enc_kSession>) ]
+
+
+/* Response by OTT to refresh request */
+/* The refresh request received by the OTT contains the time %t1
+   at which the initial request has been done by the CDM, 
+   as well as the time $t2 at which this refresh request has been done. */
+/* The time %t1 and %t2 are includes in the response, and the OTT fixes %delta,
+   the period during which the CDM is authorised to use the key
+   (starting at %t2). */  
+/* The response contains also %counter + 1, i.e. the counter received
+   in the request has been incremented by 1. */
+
+rule OTTRefreshResponse:
+  let
+    pkDevice = pk(kDevice)
+    clientID = <$serialNumber,
+                pkDevice, sign(<'device', pkDevice>, kSign),
+                pk(kSign), sign(<'root', pk(kSign)>, ~rootCert),
+                $clientInfo>
+    request = <requestID,
+               %t1,
+               %t2,
+               %counter,
+               'renewable',
+               enc(<'clientID', clientID>, kPrivacyR),
+               aenc(kPrivacyR, pk(~kOTT)),
+               n>
+    macrequest = hmac(<'renewreqTag', request>, kMacC)
+    response = <requestID,
+                %t1,
+                %t2,
+                %counter %+ %1,
+                $newlicence,
+                %delta,
+                enc(<%delta, 'use', n>, kContent)> // With KCB
+    macresponse = hmac(<'renewTag', response>, kMacS)
+  in
+  [  In(%delta),
+     OTT2_response(~rID, $ottID, ~kOTT, requestID,
+                   kContent, kEnc, kMacS, kMacC),
+    !Certificate(~rootCert),
+     In(<request, macrequest>) ]
+--[  LOTTAuthorise(requestID, $ottID, %t2, %delta),
+     LOTTRefreshResponse(~rID, $ottID, ~kOTT, requestID,
+                         kContent, kEnc, kMacS, kMacC, response), 
+     Licence($newlicence) ]->
+  [  OTT2_response(~rID, $ottID, ~kOTT, requestID,
+                   kContent, kEnc, kMacS, kMacC),
+     Out(<response, macresponse>) ]
+
+
+restriction LicenceRenewOrStop:
+  "All #i newLicence.
+     Licence(newLicence)@i
+   ==>
+     (newLicence = 'renewable' | newLicence = 'stop')"
+
+
+rule OTTSendMovie:
+  [ !Movie($title, ~movie, $ottID, ~keyID, ~kContent) ]
+-->
+  [  Out(enc(<'movietag', ~movie>, ~kContent)) ]
+
+
+
+/*-------------------------------------------------------------------*/
+/* Restrictions + helping lemmas                                     */
+/*-------------------------------------------------------------------*/
+
+/* We assume the there is only one root certificate */
+restriction UniqueRootCert:
+  "All #i #j xi xj.
+    LCertificate(xi)@i & LCertificate(xj)@j ==> #i = #j"
+
+/* Time is increasing */
+ restriction TimeIncreasing:
+  "All #i #j %t1 %t2.
+   GTime(%t1)@i & GTime(%t2)@j & i < j ==> %t1 << %t2"
+
+/* OTTRefreshResponse => OTTLicenceResponse */
+lemma OTT2 [use_induction, reuse]:
+  "All #i rID ottID kOTT requestID
+          kContent kEnc kMacS kMacC renewal_resp.
+     LOTTRefreshResponse(rID, ottID, kOTT, requestID,
+                         kContent, kEnc, kMacS, kMacC, renewal_resp)@i
+   ==> 
+     Ex #j response.
+       (LOTTLicenseResponse(rID, ottID, kOTT, requestID,
+                            kContent, kEnc, kMacS, kMacC, response)@j &
+       #j < #i)"
+
+
+/*-------------------------------------------------------------------*/
+/* Lemmas: Secrecy                                                   */
+/*-------------------------------------------------------------------*/
+/* lemmas about secrecy of the keys -
+   all are easy to establish and are marked "reuse"
+   as they could be useful to establish other lemmas */
+
+#ifdef Secrecy
+
+/* Secrecy of device (private) keys */
+lemma kDeviceSecrecy [reuse]:
+  "All #i kDevice.
+    LDeviceKey(kDevice)@i ==>
+    not (Ex #j. K(kDevice)@j)"
+
+/* Secrecy of OTT (private) keys */
+lemma kOTTSecrecy [reuse]:
+  "All #i kOTT.
+    LOTTKey(kOTT)@i ==>
+    not (Ex #j. K(kOTT)@j)"
+
+/* Secrecy of device signing keys */
+lemma kDeviceSignSecrecy [reuse]:
+  "All #i kSign.
+    LDeviceSignKey(kSign)@i ==>
+    not (Ex #j. K(kSign)@j)"
+
+/* Secrecy of private certificates */
+lemma kCertificateSecrecy [reuse]:
+  "All #i cert.
+    LCertificate(cert)@i ==>
+    not (Ex #j. K(cert)@j)"
+
+/* Secrecy of session keys (with KU) */
+lemma kSessionKeySecrecyKU [reuse]:
+  "All #i kSession.
+    LSessionKey(kSession)@i ==>
+    not (Ex #j. KU(kSession)@j)"
+
+/* Secrecy of session keys (with K) */
+lemma kSessionKeySecrecyK [reuse]:
+  "All #i kSession.
+    LSessionKey(kSession)@i ==>
+    not (Ex #j. K(kSession)@j)"
+
+
+/* Secrecy of session keys (with KU) */
+lemma CDMkSessionKeySecrecyKU [reuse]:
+  "All #i kSession.
+    LCDMSessionKey(kSession)@i ==>
+    not (Ex #j. KU(kSession)@j)"
+
+/* Secrecy of session keys (with K) */
+lemma CDMkSessionKeySecrecyK [reuse]:
+  "All #i kSession.
+    LCDMSessionKey(kSession)@i ==>
+    not (Ex #j. K(kSession)@j)"
+
+
+/* Secrecy of content keys (with KU) */
+lemma contentKeySecrecyKU [reuse]:
+  "All #i title movie ottID keyID kContent.
+    LMovieKey(title, movie, ottID, keyID, kContent)@i ==>
+    not (Ex #j. KU(kContent)@j)"
+
+/* Secrecy of device (private) keys from the point of view of the OTT */
+lemma OTTkDeviceSecrecyKU [reuse]:
+  "All #i kDevice.
+     LOTTkDeviceKey(kDevice)@i ==>
+     not (Ex #j. KU(kDevice)@j)"
+
+#endif
+/*-------------------------------------------------------------------*/
+/* Lemma: Goal 1 - Content Key secrecy                               */
+/*-------------------------------------------------------------------*/
+
+#ifdef Goal1
+
+/* Secrecy of content keys */
+lemma contentKeySecrecy:
+  "All #i title movie ottID keyID kContent.
+    LMovieKey(title, movie, ottID, keyID, kContent)@i ==>
+    not (Ex #j. K(kContent)@j)"
+
+#endif
+
+
+/*-------------------------------------------------------------------*/
+/* Lemma: Goals 2, 3, and 4 about Initial Request/Response           */
+/*-------------------------------------------------------------------*/
+/*                                                                   */
+/*  - Goal 2 (integrity): OTTLicenseResponseBeforeLoad               */
+/*                                                                   */
+/*  - Goal 3 (unicity): LoadRespUnique                               */
+/*                                                                   */
+/*  - Goal 4 (time): UseAuthorised                                   */
+/*                                                                   */
+/*-------------------------------------------------------------------*/
+
+
+#ifdef GoalInitialPart
+
+/* Helping lemma:  useful to know that macKeys that are not null have been instanciated using Derive, and thus have a certain shape */
+/* Note that the fact LCDMKeys does not labeled neither the CDMGenerateRequest rule, nor the CDMDerive rule */
+lemma CDMKeysInit[reuse, use_induction]:
+  "All #i requestID deviceID sessionID kEnc kMacS kMacC.
+     LCDMKeys(requestID, sessionID, deviceID, kEnc, kMacS, kMacC)@i ==>
+     ((Ex #j.
+         (#j < #i ) &
+         LCDMDeriveKeys(requestID, sessionID, deviceID, kEnc, kMacS, kMacC)@j) |
+      (kEnc ='null' & kMacS = 'null' & kMacC = 'null'))"
+
+
+/* When a load of a response happens in the CDM (for a legitimate content key), this response comes indeed from an OTT */
+lemma OTTLicenseResponseBeforeLoad[reuse]:
+  "All #i1 #i2 deviceID kDevice clientID requestID sessionID kContent kEnc kMacS kMacC response title movie ottID keyID. 
+    LCDMLoad(requestID, sessionID, deviceID, kDevice, clientID, kContent, kEnc, kMacS, kMacC, response)@#i1 &
+    LMovieKey(title, movie, ottID, keyID, kContent)@i2 ==>
+    (Ex #j rID kOTT . 
+        LOTTLicenseResponse(rID, ottID, kOTT, requestID, kContent, kEnc, kMacS, kMacC, response)@#j & 
+        ( #j < #i1))"
+
+
+/* A load of a given reponse can happen only once in the CDM */
+lemma LoadRespUnique:
+  "All #i1 requestID1 deviceID1 kDevice1 clientID1 sessionID1 kContent1 kEnc1 kMacS1 kMacC1 response
+       #i2 requestID2 deviceID2 kDevice2 clientID2 sessionID2 kContent2 kEnc2 kMacS2 kMacC2.
+     LCDMLoad(requestID1, sessionID1, deviceID1, kDevice1, clientID1, kContent1, kEnc1, kMacS1, kMacC1, response)@i1 &
+     LCDMLoad(requestID2, sessionID2, deviceID2, kDevice2, clientID2, kContent2, kEnc2, kMacS2, kMacC2, response)@i2
+      ==>
+     #i1 = #i2"
+
+
+/* helping lemma for establishing the UseAuthorised lemma below */
+lemma CDMContentKeyAuthorised[use_induction,reuse]:
+  "All #i requestID sessionID deviceID keyID kContent usage licencePolicy %t %delta %counter
+       #i2 title movie ottID.
+    LCDMContentKey(requestID, sessionID, deviceID, keyID, kContent, usage, licencePolicy, %t, %delta, %counter)@i &
+    not( Ex #j sessionIDBis deviceIDBis kDeviceBis clientIDBis
+               kContentBis kEncBis kMacSBis kMacCBis renewal_responseBis oldPolicy.
+               (#j < #i | #j=#i)  &
+               LCDMLoadRefresh(requestID,sessionIDBis,deviceIDBis, kDeviceBis, clientIDBis,
+                               kContentBis, kEncBis, kMacSBis, kMacCBis, renewal_responseBis, oldPolicy)@j) &
+    LMovieKey(title, movie, ottID, keyID, kContent)@i2 ==>
+    Ex #j.
+      LOTTAuthorise(requestID, ottID, %t, %delta)@j &
+      j < i"
+
+
+/* When a legitimate content key is used at time t (and assuming that no load refresh has been done), 
+then this usage has been authorised by the OTTT (in particular the timing constraint is met) */
+lemma UseAuthorised:
+  "All #i requestID sessionID deviceID keyID kContent %t
+       #i2 title movie ottID .
+    LCDMUseKey(requestID, sessionID, deviceID, keyID, kContent)@i & 
+    not( Ex #j sessionIDBis deviceIDBis kDeviceBis clientIDBis
+               kContentBis kEncBis kMacSBis kMacCBis renewal_responseBis oldPolicy.
+           (#j < #i | #j =#i) &
+           LCDMLoadRefresh(requestID,sessionIDBis,deviceIDBis, kDeviceBis, clientIDBis,
+                           kContentBis, kEncBis, kMacSBis, kMacCBis, renewal_responseBis, oldPolicy)@j) &
+    GTime(%t)@i &
+    LMovieKey(title, movie, ottID, keyID, kContent)@i2 ==>
+    Ex #j %t1 %delta.
+      LOTTAuthorise(requestID, ottID, %t1, %delta)@j &
+      j < i &
+      %t << %t1 %+ %delta"
+
+#endif
+
+
+
+/*-------------------------------------------------------------------*/
+/* Lemma: Goals 5, 6 (a and b), and 7 about Refresh Request/Response */
+/*-------------------------------------------------------------------*/
+/*                                                                   */
+/*  - Goal 5 (integrity): OTTRefreshResponseBeforeLoadRefresh        */
+/*                                                                   */
+/*  - Goal 6 (unicity): LoadRefreshRespUnique                       */
+/*  - Goal 8 : LoadRefreshOnlyIfRenewable                  */
+/*                                                                   */
+/*  - Goal 7 (time): UseAuthorised                                   */
+/*                                                                   */
+/*-------------------------------------------------------------------*/
+
+
+#ifdef GoalRenewalPart
+
+/* Only one load for each requestID */
+/* Assumption, since we don't know how the counter is handled when several loads are done */
+/* A priori only required to establish Goal 6b */
+
+restriction LoadUnique:
+  "All requestID sessionID deviceID
+       #i1 kDevice  clientID  kContent  kEnc  kMacS  kMacC  response
+       #i2 kDevice2 clientID2 kContent2 kEnc2 kMacS2 kMacC2 response2.
+    LCDMLoad(requestID, sessionID, deviceID, kDevice,  clientID,  kContent,  kEnc,  kMacS,  kMacC,  response )@#i1 &
+    LCDMLoad(requestID, sessionID, deviceID, kDevice2, clientID2, kContent2, kEnc2, kMacS2, kMacC2, response2)@#i2
+    ==>
+    #i1 = #i2"
+
+/* Helping lemma:  useful to know that macKeys that are not null have been instanciated using Derive, and thus have a certain shape */
+/* Note that the fact LCDMKeys does not labeled neither the CDMGenerateRequest rule, nor the CDMDerive rule */
+lemma CDMKeysInit[reuse, use_induction]:
+  "All #i requestID deviceID sessionID kEnc kMacS kMacC.
+     LCDMKeys(requestID, sessionID, deviceID, kEnc, kMacS, kMacC)@i ==>
+     ((Ex #j.
+         (#j < #i ) &
+         LCDMDeriveKeys(requestID, sessionID, deviceID, kEnc, kMacS, kMacC)@j) |
+      (kEnc ='null' & kMacS = 'null' & kMacC = 'null'))"
+
+
+/* Helping lemma: LCDMContentKeyNoLoad => LCDMLoad */
+lemma CDMContentKeyInit[reuse,use_induction]:
+  "All #i deviceID sessionID requestID keyID kContent usage licencePolicy xt xdelta xcpt.
+    (LCDMContentKeyNoLoad(requestID, sessionID, deviceID, keyID, kContent,
+                  usage, licencePolicy, xt , xdelta, xcpt)@i ) ==>
+    (Ex #j kDevice clientID response kEnc kMacS kMacC. 
+       ((#j < #i) &  LCDMLoad(requestID, sessionID, deviceID, kDevice, clientID, kContent, kEnc, kMacS, kMacC, response)@j))"
+
+/* Helping lemma: If keys are null, they were always null before */
+lemma CDMKeysNull [reuse, use_induction]:
+  "All #i1 #i2 requestID sessionID deviceID kEnc kMacS kMacC.
+     LCDMKeys(requestID, sessionID, deviceID, 'null', 'null', 'null')@i1 & 
+     LCDMKeys(requestID, sessionID, deviceID, kEnc, kMacS, kMacC)@i2 &
+     #i2 < #i1
+   ==> (kEnc = 'null' & kMacS = 'null' & kMacC = 'null')"
+
+
+/* Goal 2 is copied here for reuse */
+lemma OTTLicenseResponseBeforeLoad [reuse]:
+  "All #i1 #i2 deviceID kDevice clientID requestID sessionID kContent kEnc kMacS kMacC response title movie ottID keyID. 
+    LCDMLoad(requestID, sessionID, deviceID, kDevice, clientID, kContent, kEnc, kMacS, kMacC, response)@#i1 &
+    LMovieKey(title, movie, ottID, keyID, kContent)@i2 ==>
+    (Ex #j rID kOTT . 
+        LOTTLicenseResponse(rID, ottID, kOTT, requestID, kContent, kEnc, kMacS, kMacC, response)@#j & 
+        ( #j < #i1))"
+
+
+/* Goal 5: When a loadrefresh of a response happens in the CDM (for a legitimate content key), this response comes indeed from a refresh response of an OTT */
+
+lemma OTTRefreshResponseBeforeLoadRefresh[reuse]:
+"All #i1 #i2 deviceID kDevice clientID requestID sessionID kContent kEnc kMacS kMacC resp title movie ottID keyID oldPolicy. 
+   LCDMLoadRefresh(requestID, sessionID, deviceID, kDevice, clientID, kContent, kEnc, kMacS, kMacC, resp, oldPolicy)@#i1 &
+   LMovieKey(title, movie, ottID, keyID, kContent)@i2 ==>
+   (Ex #j rID  kOTT.
+     #j < #i1 &
+     LOTTRefreshResponse(rID, ottID, kOTT, requestID,kContent, kEnc, kMacS, kMacC, resp)@#j)"
+
+
+// Helping lemma
+lemma  counterIncrease[use_induction,reuse]:
+"All #j1 requestID sessionID1 deviceID1 keyID1 kContent1 usage1 policy1 t1 delta1 cpt1
+     #j2 sessionID2 deviceID2 keyID2 kContent2 usage2 policy2 t2 delta2 cpt2.
+ LCDMContentKey(requestID, sessionID1, deviceID1, keyID1, kContent1, usage1, policy1, t1, delta1, cpt1)@j1 &
+ LCDMContentKey(requestID, sessionID2, deviceID2, keyID2, kContent2, usage2, policy2, t2, delta2, cpt2)@j2 & #j1 < #j2
+==> not(cpt2 << cpt1)"
+
+
+/* Note: the proof is a bit long */
+lemma  counterIncreaseStrict[reuse]:
+"All #j1 requestID sessionID1 deviceID1 keyID1 kContent1 usage1 policy1 t1 delta1 cpt1
+     #j2 sessionID2 deviceID2 keyID2 kContent2 usage2 policy2 t2 delta2 cpt2.
+ LCDMContentKey(requestID, sessionID1, deviceID1, keyID1, kContent1, usage1, policy1, t1, delta1, cpt1)@j1 &
+ LCDMContentKeyInc(requestID, sessionID2, deviceID2, keyID2, kContent2, usage2, policy2, t2, delta2, cpt2)@j2 & #j1 < #j2
+==> cpt1 << cpt2"
+
+/* Goal 6 */
+/* Due to the fact that the counter is stricly increasing when performing a Loadrefresh, we are now able to establish Goal 6a */
+lemma LoadRefreshRespUnique:
+  "All #i1 requestID deviceID1 kDevice1 clientID1 sessionID1 kContent1
+           kEnc1 kMacS1 kMacC1 requestID1 tinit1 t1 counter licencePolicy1 delta1 oldPolicy1
+       #i2 deviceID2 kDevice2 clientID2  sessionID2 kContent2
+           kEnc2 kMacS2 kMacC2 requestID2 tinit2 t2 licencePolicy2 delta2 oldPolicy2.
+     LCDMLoadRefresh(requestID, sessionID1, deviceID1, kDevice1, clientID1, kContent1, kEnc1, kMacS1, kMacC1, <requestID1, tinit1, t1, counter, licencePolicy1, delta1>, oldPolicy1 )@i1 &
+     LCDMLoadRefresh(requestID, sessionID2, deviceID2, kDevice2, clientID2, kContent2, kEnc2, kMacS2, kMacC2, <requestID2, tinit2, t2, counter, licencePolicy2, delta2>, oldPolicy2 )@i2 
+ ==> #i1 = #i2"
+
+// Helping lemma: if the counter is the same at i1 and i2, it does not change at any point inbetween
+// trivially proved by induction, but useful for the next lemma
+lemma SameCounterBetween[use_induction, reuse]:
+  "All requestID sessionID deviceID %counter
+       #i1 keyID  usage  licencePolicy  t  delta  kContent
+       #i2 keyID2 usage2 licencePolicy2 t2 delta2 kContent2
+       #i3 keyID3 usage3 licencePolicy3 t3 delta3 kContent3 %counter3.
+     LCDMContentKey(requestID, sessionID, deviceID, keyID,  kContent, usage, licencePolicy, t, delta, %counter)@#i1 
+     & LCDMContentKey(requestID, sessionID, deviceID, keyID2, kContent2,usage2,licencePolicy2, t2, delta2, %counter)@#i2 
+     & LCDMContentKey(requestID, sessionID, deviceID, keyID3, kContent3,usage3, licencePolicy3, t3, delta3, %counter3)@#i3 
+     & #i1 < #i3 
+     & #i3 < #i2 
+    ==>  %counter = %counter3"
+
+// Helping lemma: no load inbetween (incl at i2) if the counter has not changed for the same reqID, sesID, devID, kContent
+// (a bit long, maybe see if we can make it faster)
+lemma SameCounterNoLoad[reuse]:
+  "All requestID sessionID deviceID %counter
+       #i1 keyID  usage  licencePolicy  t  delta  kContent
+       #i2 keyID2 usage2 licencePolicy2 t2 delta2 kContent2
+       #i3 kDevice clientID kEnc kMacS kMacC renewal_response oldPolicy kContent3.
+     LCDMContentKey(requestID, sessionID, deviceID, keyID,  kContent, usage,  licencePolicy,  t, delta, %counter)@#i1 
+     & LCDMContentKey(requestID, sessionID, deviceID, keyID2, kContent2,usage2, licencePolicy2, t2, delta2, %counter)@#i2 
+     & LCDMLoadRefresh(requestID, sessionID, deviceID, kDevice, clientID, kContent3, kEnc, kMacS, kMacC, renewal_response, oldPolicy)@#i3 
+     & #i1 < #i3 
+     & (#i3 < #i2 | #i3 = #i2) 
+    ==>  F"
+
+// same counter => same policy
+// takes VERY long -- see if we can optimise the oracle
+// only works with the LoadUnique restriction
+lemma SameCounterSamePolicy[use_induction, reuse]:
+  "All requestID sessionID deviceID %counter 
+       #i1 keyID  usage  licencePolicy  t  delta  kContent
+       #i2 keyID2 usage2 licencePolicy2 t2 delta2 kContent2.
+     LCDMContentKeyNoLoad(requestID, sessionID, deviceID, keyID, kContent, usage,licencePolicy,t, delta, %counter)@i1 
+     & LCDMContentKey(requestID, sessionID, deviceID, keyID2, kContent2,usage2, licencePolicy2, t2, delta2, %counter)@i2 
+     & #i1 < #i2
+    ==> licencePolicy = licencePolicy2"
+
+/* Goal 8  */
+lemma LoadRefreshOnlyIfRenewable:
+  "All #i1 requestID sessionID deviceID kDevice clientID kContent kEnc kMacS kMacC response oldPolicy
+       #i2 title movie ottID keyID.
+    LCDMLoadRefresh(requestID, sessionID, deviceID, kDevice, clientID, kContent, kEnc, kMacS, kMacC, response, oldPolicy)@i1 
+    & LMovieKey(title, movie, ottID, keyID, kContent)@i2
+  ==> oldPolicy = 'renewable' "
+
+/* helping lemma */
+lemma CDMContentKeyAuthorised[use_induction, reuse]:
+  "All #i requestID sessionID deviceID keyID kContent usage licencePolicy %t %delta %counter
+       #i2 title movie ottID
+       #j1 sessionIDBis deviceIDBis kDeviceBis clientIDBis kContentBis kEncBis kMacSBis kMacCBis renewal_responseBis oldPolicy.
+       (LCDMContentKey(requestID, sessionID, deviceID, keyID, kContent, usage, licencePolicy, %t, %delta, %counter)@i
+      & LCDMLoadRefresh(requestID,sessionIDBis,deviceIDBis, kDeviceBis, clientIDBis, kContentBis, kEncBis, kMacSBis, kMacCBis, renewal_responseBis, oldPolicy)@j1
+      & (#j1 < #i | #j1 = #i)
+      & LMovieKey(title, movie, ottID, keyID, kContent)@i2)
+     ==> (Ex #j.
+             (LOTTAuthorise(requestID, ottID, %t, %delta)@j 
+             & #j < #i))"
+
+/* Goal 7 */
+lemma UseAuthorised:
+  "All #i requestID sessionID deviceID keyID kContent %t
+       #i2 title movie ottID
+       #j sessionIDBis deviceIDBis kDeviceBis clientIDBis kContentBis kEncBis kMacSBis kMacCBis renewal_responseBis oldPolicy.
+    (LCDMUseKey(requestID, sessionID, deviceID, keyID, kContent)@i
+    & LCDMLoadRefresh(requestID,sessionIDBis,deviceIDBis, kDeviceBis, clientIDBis, kContentBis, kEncBis, kMacSBis, kMacCBis, renewal_responseBis, oldPolicy)@j
+    & (#j < #i | #j=#i)
+    & GTime(%t)@i
+    & LMovieKey(title, movie, ottID, keyID, kContent)@i2)
+    ==> (Ex #j %t1 %delta.
+            LOTTAuthorise(requestID, ottID, %t1, %delta)@j
+            & j < i
+            & %t << %t1 %+ %delta)"
+#endif
+
+/*-------------------------------------------------------------------*/
+/* Lemma: Executability                                              */
+/*-------------------------------------------------------------------*/
+#ifdef Executability
+
+/*-------------------------------------------------------------------*/
+/* First some restrictions to reduce the search space when looking for
+   the executability witness. Sound, since we still find a witness. */
+   
+
+/* Rule GenDeviceSignKey is called at most once */
+restriction onlyOnceDeviceSignKey:
+  "All #i1 kSign1 #i2 kSign2.
+    LDeviceSignKey(kSign1)@#i1 &
+    LDeviceSignKey(kSign2)@#i2 ==>
+    #i1 = #i2" 
+
+/* Rule GenDeviceKey is called at most once */
+restriction onlyOnceDeviceKey:
+  "All #i1 kDevice1 #i2 kDevice2.
+    LDeviceKey(kDevice1)@#i1 &
+    LDeviceKey(kDevice2)@#i2 ==>
+    #i1 = #i2" 
+
+/* Rule GenOTTKey is called at most once */
+restriction onlyOnceOTTKey:
+  "All #i1 kOTT1 #i2 kOTT2.
+    LOTTKey(kOTT1)@#i1 &
+    LOTTKey(kOTT2)@#i2 ==>
+    #i1 =#i2"
+
+/* Rule GenMovieKeys is called at most once */
+restriction onlyOnceMovie:
+  "All #i1 title1 movie1 ottID1 keyID1 kContent1
+       #i2 title2 movie2 ottID2 keyID2 kContent2.
+    LMovieKey(title1, movie1, ottID1, keyID1, kContent1)@#i1 &
+    LMovieKey(title2, movie2, ottID2, keyID2, kContent2)@#i2  ==>
+    #i1 = #i2"
+
+/* Rule CDMInit is called at most once */
+restriction onlyOnceCDMInit:
+  "All #i1 deviceID1 kDevice1 clientID1
+       #i2 deviceID2 kDevice2 clientID2. 
+    LCDMInit(deviceID1, kDevice1, clientID1)@#i1 &
+    LCDMInit(deviceID2, kDevice2, clientID2)@#i2 ==>
+    #i1 = #i2"
+
+/* Rule CDMOpenSession is called at most once */
+restriction onlyOnceOpenSession:
+  "All #i1 deviceID1 sessionID1 kDevice1
+       #i2 deviceID2 sessionID2 kDevice2.
+    LCDMOpenSession(sessionID1, deviceID1, kDevice1)@#i1 &
+    LCDMOpenSession(sessionID2, deviceID2, kDevice2)@#i2 ==>
+    #i1 = #i2"
+
+/* Rule CDMGenerateRequest/CDMGenerateRSASignature is called at most once */
+restriction onlyOnceCDMGenerateRequest:
+  "All #i1 deviceID1 sessionID1 requestID1 t1
+       #i2 deviceID2 sessionID2 requestID2 t2.
+    LCDMGenerateRequest(requestID1, sessionID1, deviceID1, t1)@#i1 &
+    LCDMGenerateRequest(requestID2, sessionID2, deviceID2, t2)@#i2 ==>
+    #i1 = #i2"
+
+/* Rule CDMDerive/CDMDeriveLow is called at most once */
+restriction onlyOnceCDMDerive:
+  "All #i1 deviceID1 kDevice1 clientID1 sessionID1 kEnc1 kMacS1 kMacC1 requestID1 
+       #i2 deviceID2 kDevice2 clientID2 sessionID2 kEnc2 kMacS2 kMacC2 requestID2. 
+    LCDMDerive(requestID1, sessionID1, deviceID1, kDevice1, clientID1,
+              kEnc1, kMacS1, kMacC1)@#i1 &
+    LCDMDerive(requestID2, sessionID2,  deviceID2, kDevice2, clientID2,
+              kEnc2, kMacS2, kMacC2)@#i2 ==>
+    #i1 = #i2"
+
+/* Rule CDMLoad/CDMLoadLow is called at most once */
+restriction onlyOnceCDMLoad:
+  "All #i1 deviceID1 kDevice1 clientID1 requestID1 sessionID1 kContent1
+           kEnc1 kMacS1 kMacC1 response1 
+       #i2 deviceID2 kDevice2 clientID2 requestID2 sessionID2 kContent2
+           kEnc2 kMacS2 kMacC2 response2. 
+    LCDMLoad(requestID1, sessionID1, deviceID1, kDevice1, clientID1,
+            kContent1, kEnc1, kMacS1, kMacC1,  response1)@#i1 &
+    LCDMLoad(requestID2,sessionID2, deviceID2, kDevice2, clientID2,
+            kContent2, kEnc2, kMacS2, kMacC2, response2)@#i2 ==>
+    #i1 = #i2"
+
+/* Rule CDMGenerateRefresh/CDMGenerateSignature is called at most once */
+restriction onlyOnceCDMGenerateRefreshRequest:
+  "All #i1 deviceID1 sessionID1 requestID1 t1 kEnc1 kMacS1 kMacC1 
+       #i2 deviceID2 sessionID2 requestID2 t2 kEnc2 kMacS2 kMacC2.
+    LCDMGenerateRefreshRequest(requestID1, sessionID1, deviceID1, t1,  kEnc1, kMacS1, kMacC1)@#i1 &
+    LCDMGenerateRefreshRequest(requestID2, sessionID2, deviceID2, t2, kEnc2, kMacS2, kMacC2)@#i2 ==>
+    #i1 = #i2"
+
+/* Rule CDMLoadRefresh/CDMLoadRefreshLow is called at most once */
+restriction onlyOnceCDMLoadRefresh:
+  "All #i1 deviceID1 kDevice1 clientID1 requestID1 sessionID1
+           kContent1 kEnc1 kMacS1 kMacC1 rr1 oldPolicy1
+       #i2 deviceID2 kDevice2 clientID2 requestID2 sessionID2
+           kContent2 kEnc2 kMacS2 kMacC2 rr2 oldPolicy2.
+    LCDMLoadRefresh(requestID1, sessionID1, deviceID1, kDevice1, clientID1,
+                   kContent1, kEnc1, kMacS1, kMacC1, rr1, oldPolicy1)@#i1 &
+    LCDMLoadRefresh(requestID2, sessionID2, deviceID2, kDevice2, clientID2,
+                   kContent2, kEnc2, kMacS2, kMacC2, rr2, oldPolicy2)@#i2 ==>
+    #i1 = #i2"
+
+
+/* Rule CDMUseKey is not used */
+restriction noCDMUseKey:
+  "All #i requestID sessionID deviceID keyID kContent.
+    LCDMUseKey(requestID, sessionID, deviceID, keyID, kContent)@#i ==>
+    not(#i = #i)"
+
+/* Rule InitOTT is called at most once */
+restriction onlyOnceOTTInit:
+  "All #i1 rID1 ottID1 kOTT1
+       #i2 rID2 ottID2 kOTT2. 
+    LOTTInit(rID1, ottID1, kOTT1)@#i1 &
+    LOTTInit(rID2, ottID2, kOTT2)@#i2 ==>
+    #i1 = #i2"
+
+/* Rule OTTLicenceResponse is called at most once */
+restriction onlyOnceOTTLicenseResponse:
+  "All #i1 rID1 ottID1 kOTT1 requestID1 kContent1
+           kEnc1 kMacS1 kMacC1 response1 
+       #i2 rID2 ottID2 kOTT2 requestID2 kContent2
+           kEnc2 kMacS2 kMacC2 response2.
+    LOTTLicenseResponse(rID1, ottID1, kOTT1, requestID1,
+                       kContent1,  kEnc1, kMacS1, kMacC1, response1)@#i1 &
+    LOTTLicenseResponse(rID2, ottID2, kOTT2, requestID2,
+                       kContent2,  kEnc2, kMacS2, kMacC2, response2)@#i2 ==>
+     #i1 = #i2"
+
+/* Rule OTTRefreshResponse is called at most once */
+restriction onlyOnceOTTRefreshResponse:
+  "All #i1 rID1 ottID1 kOTT1 requestID1 kContent1  kEnc1 kMacS1 kMacC1 resp1
+       #i2 rID2 ottID2 kOTT2 requestID2 kContent2 kEnc2 kMacS2 kMacC2 resp2.
+    LOTTRefreshResponse(rID1, ottID1, kOTT1, requestID1,
+                       kContent1,  kEnc1, kMacS1, kMacC1, resp1)@#i1 &
+    LOTTRefreshResponse(rID2, ottID2, kOTT2, requestID2,
+                       kContent2,  kEnc2, kMacS2, kMacC2, resp2)@#i2 ==>
+    #i1 = #i2"
+
+/* Executability lemma */
+lemma exec:
+  exists-trace
+  "Ex #i1 #i2 #i3  #i5 #i6 #i7 #i8 #i9
+      kOTT deviceID kDevice clientID
+      sessionID requestID rID ottID 
+      kContent kEnc kMacS kMacC response renewal_response t1 oldPolicy. 
+    (LCDMLoadRefresh(requestID, sessionID, deviceID, kDevice, clientID,
+                    kContent, kEnc, kMacS, kMacC, renewal_response, oldPolicy)@#i1 &
+     LOTTRefreshResponse(rID, ottID, kOTT, requestID, kContent,
+                        kEnc, kMacS, kMacC, renewal_response)@#i2 &
+     LCDMGenerateRefreshRequest(requestID, sessionID, deviceID, t1, kEnc, kMacS, kMacC)@#i3 &
+     LCDMLoad(requestID, sessionID, deviceID, kDevice, clientID,
+             kContent, kEnc, kMacS, kMacC, response)@#i5 &
+     LCDMDerive(requestID, sessionID,  deviceID, kDevice, clientID,
+               kEnc, kMacS, kMacC)@#i6 &
+     LOTTLicenseResponse(rID, ottID, kOTT, requestID, kContent,
+                        kEnc, kMacS, kMacC, response)@#i7 &
+     LCDMGenerateRequest(requestID, sessionID,deviceID,t1)@#i8 &
+     LCDMOpenSession(sessionID, deviceID, kDevice)@#i9 &
+     #i9 < #i8 & #i8 < #i7 & #i7 < #i6 & #i6 < #i5 &
+     #i5  <#i3 & #i3 < #i2 & #i2 < #i1)"
+
+#endif
+
+
+end
+
+
+
+
