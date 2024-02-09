@@ -513,8 +513,6 @@ rule OTTSendMovie:
   [  Out(enc(<'movietag', ~movie>, ~kContent)) ]
 
 
-
-
 /*-------------------------------------------------------------------*/
 /* Restrictions + helping lemmas                                     */
 /*-------------------------------------------------------------------*/
@@ -540,8 +538,6 @@ lemma OTT2 [use_induction, reuse]:
        (LOTTLicenseResponse(rID, ottID, kOTT, requestID,
                            kContent, kEnc, kMacS, kMacC, response)@j &
        #j < #i)"
-
-
 
 /*-------------------------------------------------------------------*/
 /* Lemmas: Secrecy                                                   */
@@ -623,17 +619,13 @@ lemma OTTkDeviceSecrecyKU[reuse]:
 
 #ifdef Goal1
 
-
 /* Secrecy of content keys  */
 lemma contentKeySecrecyK:
   "All #i title movie ottID keyID kContent.
      LMovieKey(title, movie, ottID, keyID, kContent)@i ==>
      not (Ex #j. K(kContent)@j)"
 
-
 #endif
-
-
 
 /*-------------------------------------------------------------------*/
 /* Lemma: Goals 2, 3, and 4 about Initial Request/Response           */
@@ -742,28 +734,25 @@ lemma UseAuthorised:
 
 #endif
 
-
-
 /*-------------------------------------------------------------------*/
-/* Lemma: Goals 5, 6 (a and b), and 7 about Refresh Request/Response */
+/* Lemma: Goals 5, 6, 7, 8 about Refresh Request/Response            */
 /*-------------------------------------------------------------------*/
 /*                                                                   */
 /*  - Goal 5 (integrity): OTTRefreshResponseBeforeLoadRefresh        */
 /*                                                                   */
-/*  - Goal 6 (unicity): LoadRefreshRespUnique                       */
-/*  - Goal 8 : LoadRefreshOnlyIfRenewable                            */
+/*  - Goal 6 (unicity): LoadRefreshRespUnique                        */
 /*                                                                   */
 /*  - Goal 7 (time): UseAuthorised                                   */
 /*                                                                   */
+/*  - Goal 8 (bonus): LoadRefreshOnlyIfRenewable                     */
+/*                                                                   */
 /*-------------------------------------------------------------------*/
-
-
 
 #ifdef GoalRenewalPart
 
 /* Only one request for each session */
 /* as mentioned in the new standard draft - December 2023 */
-/* This restriction is needed to establish e.g. Goal 6b */
+/* This restriction is needed to establish e.g. Goal 8 */
 restriction GenerateRequestUniquePerSession:
   "All #i1 requestID1 sessionID deviceID1 t1
        #i2 requestID2 deviceID2 t2.
@@ -825,7 +814,7 @@ lemma OTTLicenseResponseBeforeLoad [reuse]:
 
 
 /* Only one load succeeds for each requestID */
-/* A priori only required to establish Goal 6b */
+/* A priori only required to establish Goal 8 */
 lemma LoadUnique[reuse]:
   "All requestID sessionID deviceID
        #i1 kDevice  clientID  kContent  kEnc  kMacS  kMacC  response
@@ -886,7 +875,7 @@ lemma counterIncreaseStrict[reuse]:
 
 /* Goal 6 */
 /* Due to the fact that the counter is stricly increasing when performing
-   a Loadrefresh, we are now able to establish Goal 6a */
+   a Loadrefresh, we are now able to establish Goal 6 */
 lemma LoadRefreshRespUnique:
   "All #i1 requestID deviceID1 kDevice1 clientID1 sessionID1 kContent1
            kEnc1 kMacS1 kMacC1 requestID1 tinit1 t1 counter licencePolicy1
@@ -952,7 +941,7 @@ lemma SameCounterNoLoad[reuse]:
 
 
 /* same counter => same policy
-   takes VERY long -- see if we can optimise the oracle
+   takes VERY long
    only works with the LoadUnique property */
 lemma SameCounterSamePolicy[use_induction, reuse]:
   "All requestID sessionID deviceID %counter 

@@ -727,15 +727,16 @@ lemma UseAuthorised:
 
 
 /*-------------------------------------------------------------------*/
-/* Lemma: Goals 5, 6 (a and b), and 7 about Refresh Request/Response */
+/* Lemma: Goals 5, 6, 7, 8 about Refresh Request/Response            */
 /*-------------------------------------------------------------------*/
 /*                                                                   */
 /*  - Goal 5 (integrity): OTTRefreshResponseBeforeLoadRefresh        */
 /*                                                                   */
-/*  - Goal 6 (unicity): LoadRefreshRespUnique                       */
-/*  - Goal 8 : LoadRefreshOnlyIfRenewable                  */
+/*  - Goal 6 (unicity): LoadRefreshRespUnique                        */
 /*                                                                   */
 /*  - Goal 7 (time): UseAuthorised                                   */
+/*                                                                   */
+/*  - Goal 8 (bonus): LoadRefreshOnlyIfRenewable                     */
 /*                                                                   */
 /*-------------------------------------------------------------------*/
 
@@ -744,7 +745,7 @@ lemma UseAuthorised:
 
 /* Only one load for each requestID */
 /* Assumption, since we don't know how the counter is handled when several loads are done */
-/* A priori only required to establish Goal 6b */
+/* A priori only required to establish Goal 8 */
 
 restriction LoadUnique:
   "All requestID sessionID deviceID
@@ -822,7 +823,7 @@ lemma  counterIncreaseStrict[reuse]:
 ==> cpt1 << cpt2"
 
 /* Goal 6 */
-/* Due to the fact that the counter is stricly increasing when performing a Loadrefresh, we are now able to establish Goal 6a */
+/* Due to the fact that the counter is stricly increasing when performing a Loadrefresh, we are now able to establish Goal 6 */
 lemma LoadRefreshRespUnique:
   "All #i1 requestID deviceID1 kDevice1 clientID1 sessionID1 kContent1
            kEnc1 kMacS1 kMacC1 requestID1 tinit1 t1 counter licencePolicy1 delta1 oldPolicy1
@@ -861,7 +862,7 @@ lemma SameCounterNoLoad[reuse]:
     ==>  F"
 
 // same counter => same policy
-// takes VERY long -- see if we can optimise the oracle
+// takes VERY long
 // only works with the LoadUnique restriction
 lemma SameCounterSamePolicy[use_induction, reuse]:
   "All requestID sessionID deviceID %counter 

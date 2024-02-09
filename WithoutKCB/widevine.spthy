@@ -538,8 +538,6 @@ lemma OTT2 [use_induction, reuse]:
                             kContent, kEnc, kMacS, kMacC, response)@j &
         #j < #i)"
 
-
-
 /*-------------------------------------------------------------------*/
 /* Lemmas: Secrecy                                                   */
 /*-------------------------------------------------------------------*/
@@ -599,8 +597,6 @@ lemma contentKeySecrecyKU[reuse]:
 
 #endif
 
-
-
 /*-------------------------------------------------------------------*/
 /* Lemma: Goal 1 - Content Key secrecy                               */
 /*-------------------------------------------------------------------*/
@@ -614,8 +610,6 @@ lemma contentKeySecrecyK:
 
 
 #endif
-
-
 
 /*-------------------------------------------------------------------*/
 /* Lemma: Goals 2, 3, and 4 about Initial Request/Response           */
@@ -725,16 +719,19 @@ lemma UseAuthorised:
 
 
 /*-------------------------------------------------------------------*/
-/* Lemma: Goals 5, 6 (a and b), and 7 about Refresh Request/Response */
+/* Lemma: Goals 5, 6, 7, 8 about Refresh Request/Response            */
 /*-------------------------------------------------------------------*/
 /*                                                                   */
 /*  - Goal 5 (integrity): OTTRefreshResponseBeforeLoadRefresh        */
 /*      -> does not hold -- see attack                               */
 /*                                                                   */
-/*  - Goal 6 (unicity): LoadRefreshRespUnique                       */
+/*  - Goal 6 (unicity): LoadRefreshRespUnique                        */
 /*      -> verified                                                  */
 /*                                                                   */
 /*  - Goal 7 (time): UseAuthorised                                   */
+/*      -> does not hold due to the attack on Goal 5                 */
+/*                                                                   */
+/*  - Goal 8 (bonus): LoadRefreshOnlyIfRenewable                     */
 /*      -> does not hold due to the attack on Goal 5                 */
 /*                                                                   */
 /*-------------------------------------------------------------------*/
@@ -1267,7 +1264,7 @@ qed
 
 /* Only one request for each session */
 /* as mentioned in the new standard draft - December 2023 */
-/* This restriction is needed to establish e.g. Goal 6b */
+/* This restriction is needed to establish e.g. Goal 8 */
 restriction GenerateRequestUniquePerSession:
   "All #i1 requestID1 sessionID deviceID1 t1
        #i2 requestID2 deviceID2 t2.
@@ -1277,7 +1274,7 @@ restriction GenerateRequestUniquePerSession:
      #i1 = #i2"
 
 /* Only one load succeeds for each requestID */
-/* A priori only required to establish Goal 6b */
+/* A priori only required to establish Goal 8 */
 lemma LoadUnique[reuse]:
   "All requestID sessionID deviceID
        #i1 kDevice  clientID  kContent  kEnc  kMacS  kMacC  response

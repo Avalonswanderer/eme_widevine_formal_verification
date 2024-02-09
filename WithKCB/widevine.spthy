@@ -739,16 +739,19 @@ lemma UseAuthorised:
 
 
 /*-------------------------------------------------------------------*/
-/* Lemma: Goals 5, 6 (a and b), and 7 about Refresh Request/Response */
+/* Lemma: Goals 5, 6, 7, 8 about Refresh Request/Response            */
 /*-------------------------------------------------------------------*/
 /*                                                                   */
 /*  - Goal 5 (integrity): OTTRefreshResponseBeforeLoadRefresh        */
 /*      -> does not hold -- see attack                               */
 /*                                                                   */
-/*  - Goal 6 (unicity): LoadRefreshRespUnique                       */
+/*  - Goal 6 (unicity): LoadRefreshRespUnique                        */
 /*      -> verified                                                  */
 /*                                                                   */
 /*  - Goal 7 (time): UseAuthorised                                   */
+/*      -> does not hold due to the attack on Goal 5                 */
+/*                                                                   */
+/*  - Goal 8 (bonus): LoadRefreshOnlyIfRenewable                     */
 /*      -> does not hold due to the attack on Goal 5                 */
 /*                                                                   */
 /*-------------------------------------------------------------------*/
@@ -788,7 +791,7 @@ lemma counterIncreaseStrict[reuse]:
 
 /* Goal 6 */
 /* Due to the fact that the counter is stricly increasing when performing
-   a Loadrefresh, we are now able to establish Goal 6a */
+   a Loadrefresh, we are now able to establish Goal 6 */
 lemma LoadRefreshRespUnique:
   "All #i1 requestID deviceID1 kDevice1 clientID1 sessionID1 kContent1
            kEnc1 kMacS1 kMacC1 requestID1 tinit1 t1 counter licencePolicy1
@@ -1496,7 +1499,7 @@ qed
 /* Due to the presence of the nonce in the refresh phase,
    it could happen even when only one requestID exists,
    in the case where kContent is a fake key from the attacker */
-/* A priori only required to establish Goal 6b */
+/* A priori only required to establish Goal 8 */
 restriction LoadUnique:
   "All requestID sessionID deviceID
        #i1 kDevice  clientID  kContent  kEnc  kMacS  kMacC  response
