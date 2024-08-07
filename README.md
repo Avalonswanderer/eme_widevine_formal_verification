@@ -1,5 +1,19 @@
 # EME Widevine Tamarin Models
 
+This repository contains the artifact for the paper "Formal Security Analysis of Widevine through the W3C EME Standard", presented at USENIX Security 2024. The artifact provides formal models and proofs for analyzing the security of Widevine DRM, particularly in the context of the W3C Encrypted Media Extensions (EME) API. Using the TAMARIN Prover, we examine both the Android and desktop versions of Widevine, uncovering a critical vulnerability that could allow unlimited media consumption. The repository includes models for both the vulnerable and fixed versions, along with scripts to reproduce the analysis and proofs.
+
+### Key Features:
+
+- Formal models for Widevine DRM (Android and Desktop versions)
+- Scripts to reproduce the security analysis using TAMARIN Prover
+- Analysis of seven security goals, with a focus on confidentiality, integrity, and license expiration
+
+### Repository Structure:
+
+- WithKCB: Android version with Key Control Block
+- WithoutKCB: Desktop version without Key Control Block
+- FixWithKCB and FixWithoutKCB: Fixed versions for both platforms
+
 Dependency:
 - `tamarin 1.8.0`
 
